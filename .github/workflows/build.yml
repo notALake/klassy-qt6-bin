@@ -1,0 +1,94 @@
+name: Build klassy package (latest upstream)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq and curl for API calls
+        run: pacman -Sy --noconfirm --needed jq curl
+
+      - name: Get latest klassy release tag
+        id: upstream
+        run: |
+          LATEST_TAG=$(curl -s https://api.github.com/repos/paulmcauley/klassy/releases/latest | jq -r '.tag_name')
+          if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" == "null" ]; then
+            echo "Failed to fetch latest release tag from GitHub API"
+            exit 1
+          fi
+          # strip leading 'v' if present, e.g. v6.7 -> 6.7
+          PKGVER="${LATEST_TAG#v}"
+          echo "Latest upstream tag: $LATEST_TAG (pkgver=$PKGVER)"
+          echo "pkgver=${PKGVER}" >> "$GITHUB_OUTPUT"
+
+      - name: Patch PKGBUILD with resolved version
+        run: |
+          sed -i "s/__PKGVER__/${{ steps.upstream.outputs.pkgver }}/" PKGBUILD
+          cat PKGBUILD
+
+      - name: Update system and install build deps
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            breeze-icons \
+            hicolor-icon-theme \
+            frameworkintegration \
+            kcmutils \
+            kcolorscheme \
+            kconfig \
+            kcoreaddons \
+            kdecoration \
+            kguiaddons \
+            ki18n \
+            kiconthemes \
+            kirigami \
+            kwidgetsaddons \
+            kwindowsystem \
+            qt6-base \
+            qt6-declarative \
+            qt6-svg \
+            xdg-utils \
+            extra-cmake-modules \
+            git
+
+      - name: Create unprivileged build user
+        run: |
+          useradd -m builder
+          # makepkg refuses to run as root
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Build package
+        run: |
+          su builder -c "cd '$GITHUB_WORKSPACE' && makepkg -s --noconfirm --needed"
+
+      - name: Collect artifact info
+        id: pkginfo
+        run: |
+          PKGFILE=$(find . -maxdepth 1 -name '*.pkg.tar.zst' | head -n1)
+          PKGVER=$(awk -F= '/^pkgver=/{print $2}' PKGBUILD)
+          PKGREL=$(awk -F= '/^pkgrel=/{print $2}' PKGBUILD)
+          echo "pkgfile=${PKGFILE}" >> "$GITHUB_OUTPUT"
+          echo "pkgver=${PKGVER}" >> "$GITHUB_OUTPUT"
+          echo "pkgrel=${PKGREL}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: klassy-package
+          path: ${{ steps.pkginfo.outputs.pkgfile }}
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.pkginfo.outputs.pkgver }}-${{ steps.pkginfo.outputs.pkgrel }}
+          name: klassy ${{ steps.pkginfo.outputs.pkgver }}-${{ steps.pkginfo.outputs.pkgrel }}
+          files: ${{ steps.pkginfo.outputs.pkgfile }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
